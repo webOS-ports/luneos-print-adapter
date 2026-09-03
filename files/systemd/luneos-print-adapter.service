@@ -1,0 +1,15 @@
+[Unit]
+Description=LuneOS print adapter
+Requires=ls-hubd.service
+After=ls-hubd.service cups.service
+# The adapter is useful without cupsd (it reports no printers rather than
+# failing), but there is nothing to print to until cupsd is up.
+Wants=cups.service
+
+[Service]
+Type=simple
+Restart=on-failure
+ExecStart=/usr/sbin/luneos-print-adapter
+
+[Install]
+WantedBy=multi-user.target

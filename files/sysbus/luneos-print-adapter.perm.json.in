@@ -1,0 +1,17 @@
+{
+    "com.palm.printmgr": [
+        "print.operation"
+    ],
+    "com.webos.service.print": [
+        "print.operation"
+    ],
+    "com.webos.surfacemanager-cardshell": [
+        "print.query"
+    ],
+    "com.palm.app.printmanager*": [
+        "print.operation"
+    ],
+    "org.webosports.app.printmanager*": [
+        "print.operation"
+    ]
+}

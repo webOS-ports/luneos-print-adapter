@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=com.palm.printmgr
+Exec=@WEBOS_INSTALL_SBINDIR@/luneos-print-adapter
+Type=static
