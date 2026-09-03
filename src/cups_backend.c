@@ -26,6 +26,13 @@
 #include "cups_backend.h"
 #include "print_errors.h"
 
+/*
+ * cups.h defines CUPS_FORMAT_* for the MIME *values* but has no constant for
+ * the option name itself. cupsCheckDestSupported() appends "-supported", so
+ * this queries document-format-supported.
+ */
+#define PRINT_OPTION_DOCUMENT_FORMAT	"document-format"
+
 /* Formats we are willing to hand to CUPS without converting first. */
 static const char *supported_formats[] = {
 	CUPS_FORMAT_PDF,
@@ -258,7 +265,8 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 		int i;
 
 		for (i = 0; supported_formats[i]; i++) {
-			if (option_supports(dest, info, CUPS_FORMAT,
+			if (option_supports(dest, info,
+			                    PRINT_OPTION_DOCUMENT_FORMAT,
 			                    supported_formats[i])) {
 				caps->is_supported = true;
 				break;
