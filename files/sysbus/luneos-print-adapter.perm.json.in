@@ -1,26 +1,6 @@
 {
-    "com.palm.printmgr": [
-        "print.operation"
-    ],
-    "com.webos.service.print": [
-        "print.operation"
-    ],
-    "org.webosports.service.print": [
-        "print.operation"
-    ],
-    "org.webosports.app.settings*": [
-        "print.operation"
-    ],
-    "com.palm.app.settings*": [
-        "print.operation"
-    ],
-    "com.webos.surfacemanager-cardshell": [
-        "print.query"
-    ],
-    "com.palm.app.printmanager*": [
-        "print.operation"
-    ],
-    "org.webosports.app.printmanager*": [
+    "*": [
+        "print.query",
         "print.operation"
     ]
 }
