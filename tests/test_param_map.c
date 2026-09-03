@@ -138,6 +138,18 @@ int main(void)
 	       pm_tray_webos_to_ipp("Unspecified"), NULL);
 	ck_bool("tray Unspecified still valid input",
 	        pm_tray_is_valid("Unspecified"), true);
+	/* IPP names that real printers use for the main cassette and the
+	 * bypass feed must fold onto the webOS keywords, and the forward
+	 * direction must still yield the canonical IPP name. */
+	ck_str("tray rev main -> Tray1", pm_tray_ipp_to_webos("main"), "Tray1");
+	ck_str("tray rev tray-1 -> Tray1", pm_tray_ipp_to_webos("tray-1"),
+	       "Tray1");
+	ck_str("tray Tray1 forward stays tray-1",
+	       pm_tray_webos_to_ipp("Tray1"), "tray-1");
+	ck_str("tray rev by-pass-tray -> Manual",
+	       pm_tray_ipp_to_webos("by-pass-tray"), "Manual");
+	ck_str("tray Manual forward stays manual",
+	       pm_tray_webos_to_ipp("Manual"), "manual");
 
 	/* --- validation accepts every keyword the real daemon accepted --- */
 	ck_bool("valid media US_Letter", pm_media_is_valid("US_Letter"), true);

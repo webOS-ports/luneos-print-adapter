@@ -267,9 +267,16 @@ static const struct kv tray_table[] = {
 	{ "Unspecified",	NULL },
 	{ "Auto",		"auto" },
 	{ "Tray1",		"tray-1" },
+	/* "main" is what IPP Everywhere printers most often call the primary
+	 * cassette; without this the tray list came back missing its main
+	 * tray on a real queue. Aliased after tray-1 so the forward mapping
+	 * still produces the canonical name. */
+	{ "Tray1",		"main" },
 	{ "Tray2",		"tray-2" },
 	{ "Photo",		"photo" },
 	{ "Manual",		"manual" },
+	/* The bypass/multipurpose tray is hand-fed, so it presents as Manual. */
+	{ "Manual",		"by-pass-tray" },
 	{ "Manual Env",		"envelope-manual" },
 	{ "Manual CD",		NULL },
 	{ "Optional",		"tray-3" },

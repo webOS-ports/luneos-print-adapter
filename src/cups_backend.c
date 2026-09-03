@@ -33,6 +33,18 @@
  */
 #define PRINT_OPTION_DOCUMENT_FORMAT	"document-format"
 
+/*
+ * How long to wait when opening a connection to a printer.
+ *
+ * Deliberately short. These calls are synchronous and run on the LS2 main
+ * loop, so every millisecond here is a millisecond the whole service is
+ * unresponsive. The original daemon dodged this by running the printers
+ * methods through deferred wrappers on a worker thread
+ * (_printers_method_get_capabilities_wrapper_deferred_wrapper); doing the same
+ * is the proper fix and is not done yet.
+ */
+#define CONNECT_TIMEOUT_MS	5000
+
 /* Formats we are willing to hand to CUPS without converting first. */
 static const char *supported_formats[] = {
 	CUPS_FORMAT_PDF,
@@ -138,21 +150,21 @@ GList *cups_backend_enumerate(void)
 	return g_list_reverse(out);
 }
 
-static bool option_supports(cups_dest_t *dest, cups_dinfo_t *info,
-                            const char *attr, const char *value)
+static bool option_supports(http_t *http, cups_dest_t *dest,
+                            cups_dinfo_t *info, const char *attr,
+                            const char *value)
 {
-	return cupsCheckDestSupported(CUPS_HTTP_DEFAULT, dest, info, attr,
-	                              value) != 0;
+	return cupsCheckDestSupported(http, dest, info, attr, value) != 0;
 }
 
-static GList *collect_supported(cups_dest_t *dest, cups_dinfo_t *info,
-                                const char *attr)
+static GList *collect_supported(http_t *http, cups_dest_t *dest,
+                                cups_dinfo_t *info, const char *attr)
 {
 	ipp_attribute_t *values;
 	GList *out = NULL;
 	int i, count;
 
-	values = cupsFindDestSupported(CUPS_HTTP_DEFAULT, dest, info, attr);
+	values = cupsFindDestSupported(http, dest, info, attr);
 	if (!values)
 		return NULL;
 
@@ -173,6 +185,8 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 	cups_dinfo_t *info;
 	struct cups_caps *caps;
 	ipp_attribute_t *attr;
+	http_t *http;
+	char resource[1024];
 	GList *l;
 
 	dest = cupsGetNamedDest(CUPS_HTTP_DEFAULT, printer_id, NULL);
@@ -181,8 +195,29 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 		return NULL;
 	}
 
-	info = cupsCopyDestInfo(CUPS_HTTP_DEFAULT, dest);
+	/*
+	 * Ask the printer, not the scheduler.
+	 *
+	 * cupsCopyDestInfo(CUPS_HTTP_DEFAULT, ...) answers out of whatever
+	 * cupsd has cached. For a driverless queue that can be nothing at all -
+	 * observed on a Lexmark MC2425adw whose "lpadmin -m everywhere" timed
+	 * out before it could fetch attributes, leaving a queue with no PPD.
+	 * The capability probes below then all came back false/empty while
+	 * still reporting success, which is worse than an error because the UI
+	 * would offer a printer with no paper sizes.
+	 *
+	 * cupsConnectDest() opens a connection to the destination itself, so
+	 * the attributes come from the device. Fall back to the scheduler if
+	 * the printer will not answer - a local queue with a real PPD is still
+	 * perfectly serviceable that way.
+	 */
+	http = cupsConnectDest(dest, CUPS_DEST_FLAGS_NONE, CONNECT_TIMEOUT_MS,
+	                       NULL, resource, sizeof(resource), NULL, NULL);
+
+	info = cupsCopyDestInfo(http ? http : CUPS_HTTP_DEFAULT, dest);
 	if (!info) {
+		if (http)
+			httpClose(http);
 		cupsFreeDests(1, dest);
 		*err = PM_ERR_COMM_GET_CAPS_FAILED;
 		return NULL;
@@ -190,23 +225,23 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 
 	caps = g_new0(struct cups_caps, 1);
 
-	caps->media_sizes = collect_supported(dest, info, CUPS_MEDIA);
-	caps->media_types = collect_supported(dest, info, CUPS_MEDIA_TYPE);
-	caps->trays = collect_supported(dest, info, CUPS_MEDIA_SOURCE);
+	caps->media_sizes = collect_supported(http, dest, info, CUPS_MEDIA);
+	caps->media_types = collect_supported(http, dest, info, CUPS_MEDIA_TYPE);
+	caps->trays = collect_supported(http, dest, info, CUPS_MEDIA_SOURCE);
 
-	caps->can_duplex = option_supports(dest, info, CUPS_SIDES,
+	caps->can_duplex = option_supports(http, dest, info, CUPS_SIDES,
 	                                   CUPS_SIDES_TWO_SIDED_PORTRAIT);
 
-	caps->quality_draft = option_supports(dest, info, CUPS_PRINT_QUALITY,
+	caps->quality_draft = option_supports(http, dest, info, CUPS_PRINT_QUALITY,
 	                                      CUPS_PRINT_QUALITY_DRAFT);
-	caps->quality_normal = option_supports(dest, info, CUPS_PRINT_QUALITY,
+	caps->quality_normal = option_supports(http, dest, info, CUPS_PRINT_QUALITY,
 	                                       CUPS_PRINT_QUALITY_NORMAL);
-	caps->quality_high = option_supports(dest, info, CUPS_PRINT_QUALITY,
+	caps->quality_high = option_supports(http, dest, info, CUPS_PRINT_QUALITY,
 	                                     CUPS_PRINT_QUALITY_HIGH);
 
-	caps->has_color = option_supports(dest, info, CUPS_PRINT_COLOR_MODE,
+	caps->has_color = option_supports(http, dest, info, CUPS_PRINT_COLOR_MODE,
 	                                  CUPS_PRINT_COLOR_MODE_COLOR);
-	caps->can_grayscale = option_supports(dest, info,
+	caps->can_grayscale = option_supports(http, dest, info,
 	                                      CUPS_PRINT_COLOR_MODE,
 	                                      CUPS_PRINT_COLOR_MODE_MONOCHROME);
 
@@ -224,7 +259,7 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 	 * "borderless" in them, which is a vendor convention rather than a
 	 * standard.
 	 */
-	attr = cupsFindDestSupported(CUPS_HTTP_DEFAULT, dest, info,
+	attr = cupsFindDestSupported(http, dest, info,
 	                             "media-bottom-margin-supported");
 	if (attr) {
 		int i, count = ippGetCount(attr);
@@ -237,7 +272,7 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 		}
 	}
 
-	attr = cupsFindDestSupported(CUPS_HTTP_DEFAULT, dest, info,
+	attr = cupsFindDestSupported(http, dest, info,
 	                             "printer-resolution-supported");
 	if (attr) {
 		int i, count = ippGetCount(attr);
@@ -265,7 +300,7 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 		int i;
 
 		for (i = 0; supported_formats[i]; i++) {
-			if (option_supports(dest, info,
+			if (option_supports(http, dest, info,
 			                    PRINT_OPTION_DOCUMENT_FORMAT,
 			                    supported_formats[i])) {
 				caps->is_supported = true;
@@ -275,6 +310,8 @@ struct cups_caps *cups_backend_get_caps(const char *printer_id, int *err)
 	}
 
 	cupsFreeDestInfo(info);
+	if (http)
+		httpClose(http);
 	cupsFreeDests(1, dest);
 
 	return caps;
@@ -427,11 +464,26 @@ int cups_backend_submit(const char *printer_id, const char *title,
 
 		if (cupsFinishDocument(CUPS_HTTP_DEFAULT, printer_id)
 		    != IPP_STATUS_OK) {
+			ipp_status_t st = cupsLastError();
+
 			g_warning("cupsFinishDocument failed: %s",
 			          cupsLastErrorString());
 			cupsCancelJob2(CUPS_HTTP_DEFAULT, printer_id, job_id, 0);
 			cupsFreeOptions(num_options, options);
-			*err = PM_ERR_JOB_ADD_PAGE_FAILED;
+
+			/*
+			 * A queue with no filter chain rejects anything it
+			 * cannot print natively - printing a PDF to a
+			 * driverless queue on an image without cups-filters
+			 * gives exactly this. Reporting it as a generic page
+			 * failure sends the user hunting in the wrong place,
+			 * so surface it as the format error it is.
+			 */
+			if (st == IPP_STATUS_ERROR_DOCUMENT_FORMAT_NOT_SUPPORTED)
+				*err = PM_ERR_UNSUPPORTED_MIME_TYPE;
+			else
+				*err = PM_ERR_JOB_ADD_PAGE_FAILED;
+
 			return -1;
 		}
 	}

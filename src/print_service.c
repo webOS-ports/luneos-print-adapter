@@ -56,10 +56,20 @@
 /* How often we poll CUPS for job state while any job is in flight. */
 #define JOB_POLL_INTERVAL_MS	1000
 
-/* Subscription keys, matching the method paths clients subscribe on. */
-#define KEY_PRINTERS_LIST	"/printers/list"
-#define KEY_JOBS_STATUS		"/jobs/getStatus"
-#define KEY_JOBS_RENDER_STATUS	"/jobs/getRenderStatus"
+/*
+ * Subscription addressing.
+ *
+ * LSSubscriptionPost() takes the category and the method as two arguments and
+ * joins them itself to form the key LSSubscriptionProcess() registered the
+ * subscriber under. Passing the joined path as both - which is easy to do and
+ * compiles fine - yields a key nothing is subscribed to, so every post is
+ * silently dropped and a client sees only its initial ack. Keep them split.
+ */
+#define CAT_PRINTERS		"/printers"
+#define CAT_JOBS		"/jobs"
+#define METHOD_LIST		"list"
+#define METHOD_GET_STATUS	"getStatus"
+#define METHOD_GET_RENDER_STATUS "getRenderStatus"
 
 extern GMainLoop *event_loop;
 
@@ -146,8 +156,7 @@ static void post_printer_event(struct print_service *s,
 	            jstring_create(p->is_discovered ? "fromZeroconf"
 	                                            : "fromManualAdd"));
 
-	luna_service_post_subscription(s->handle, KEY_PRINTERS_LIST,
-	                               KEY_PRINTERS_LIST, o);
+	luna_service_post_subscription(s->handle, CAT_PRINTERS, METHOD_LIST, o);
 	j_release(&o);
 }
 
@@ -623,8 +632,7 @@ static void post_job_state(struct print_service *s, struct print_job *job,
 		jobject_put(o, J_CSTR_TO_JVAL("blockedReasons"), arr);
 	}
 
-	luna_service_post_subscription(s->handle, KEY_JOBS_STATUS,
-	                               KEY_JOBS_STATUS, o);
+	luna_service_post_subscription(s->handle, CAT_JOBS, METHOD_GET_STATUS, o);
 	j_release(&o);
 }
 
@@ -643,8 +651,7 @@ static void post_page_info(struct print_service *s, struct print_job *job,
 	jobject_put(o, J_CSTR_TO_JVAL("pageCorrupted"), jstring_create("false"));
 	jobject_put(o, J_CSTR_TO_JVAL("pageTime"), jnumber_create_i32(0));
 
-	luna_service_post_subscription(s->handle, KEY_JOBS_STATUS,
-	                               KEY_JOBS_STATUS, o);
+	luna_service_post_subscription(s->handle, CAT_JOBS, METHOD_GET_STATUS, o);
 	j_release(&o);
 }
 
@@ -1601,8 +1608,8 @@ static bool jobs_set_render_status(LSHandle *h, LSMessage *m, void *ctx)
 	            jnumber_create_i32(code));
 	jobject_put(event, J_CSTR_TO_JVAL("renderResultText"),
 	            jstring_create(text));
-	luna_service_post_subscription(s->handle, KEY_JOBS_RENDER_STATUS,
-	                               KEY_JOBS_RENDER_STATUS, event);
+	luna_service_post_subscription(s->handle, CAT_JOBS,
+	                               METHOD_GET_RENDER_STATUS, event);
 	j_release(&event);
 
 	luna_service_message_reply_success(h, m);
