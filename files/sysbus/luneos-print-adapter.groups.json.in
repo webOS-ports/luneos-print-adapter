@@ -1,5 +1,5 @@
 {
- "allowedNames": ["com.palm.printmgr", "com.webos.service.print"],
+ "allowedNames": ["com.palm.printmgr", "com.webos.service.print", "org.webosports.service.print"],
  "print.operation": ["dev", "oem"],
  "print.query": ["dev", "oem"]
 }

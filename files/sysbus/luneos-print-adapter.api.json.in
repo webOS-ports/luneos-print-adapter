@@ -15,7 +15,9 @@
         "com.webos.service.print/printers/listActive",
         "com.webos.service.print/jobs/getStatus",
         "com.webos.service.print/jobs/getRenderStatus",
-        "com.webos.service.print/jobs/listAll"
+        "com.webos.service.print/jobs/listAll",
+        "org.webosports.service.print/listPrinters",
+        "org.webosports.service.print/listJobs"
     ],
     "print.operation": [
         "com.palm.printmgr/printers/setCurrent",
@@ -47,6 +49,11 @@
         "com.webos.service.print/jobs/close",
         "com.webos.service.print/jobs/cancel",
         "com.webos.service.print/jobs/setRenderStatus",
-        "com.webos.service.print/jobs/allAtOnce"
+        "com.webos.service.print/jobs/allAtOnce",
+        "org.webosports.service.print/addPrinter",
+        "org.webosports.service.print/removePrinter",
+        "org.webosports.service.print/setDefaultPrinter",
+        "org.webosports.service.print/cancelJob",
+        "org.webosports.service.print/cancelAllJobs"
     ]
 }

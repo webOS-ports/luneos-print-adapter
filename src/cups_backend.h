@@ -34,8 +34,20 @@ struct cups_printer {
 	char *printer_id;	/* CUPS dest name; the webOS printerID */
 	char *printer_name;	/* printer-info, human readable */
 	char *printer_address;	/* host part of device-uri */
+	char *uri;		/* full device or printer URI */
+	char *location;		/* printer-location, may be empty */
+	char *make_and_model;	/* printer-make-and-model, may be empty */
+	char *state;		/* "idle", "processing" or "stopped" */
 	bool supports_ipp;
 	bool is_discovered;	/* found over mDNS rather than a local queue */
+};
+
+/* One entry of the CUPS queue, for a queue view. */
+struct cups_queue_job {
+	int id;
+	char *dest;
+	char *title;
+	int ipp_state;		/* IPP job-state enum */
 };
 
 struct cups_caps {
@@ -84,6 +96,30 @@ struct cups_job_state {
 };
 
 void cups_printer_free(struct cups_printer *p);
+void cups_queue_job_free(struct cups_queue_job *j);
+
+/*
+ * Active jobs across every destination, newest CUPS state. GList of
+ * struct cups_queue_job*, caller owns.
+ */
+GList *cups_backend_list_jobs(void);
+
+/*
+ * Create or delete a CUPS queue, i.e. what lpadmin does. Needed because the
+ * Settings page adds printers by name and URI and expects them to become real,
+ * printable queues rather than a private list this service keeps to itself.
+ */
+/*
+ * name is the CUPS queue name (restricted character set); info is the
+ * human-readable name to show, stored as printer-info. They differ whenever
+ * the user typed something with a space in it.
+ */
+bool cups_backend_add_queue(const char *name, const char *info,
+                            const char *uri, int *err);
+bool cups_backend_remove_queue(const char *name, int *err);
+
+/* IPP job-state enum to the string the Settings page expects. */
+const char *cups_backend_jobstate_string(int ipp_state);
 void cups_caps_free(struct cups_caps *c);
 void cups_job_state_free(struct cups_job_state *s);
 

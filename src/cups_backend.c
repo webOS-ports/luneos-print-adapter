@@ -61,7 +61,58 @@ void cups_printer_free(struct cups_printer *p)
 	g_free(p->printer_id);
 	g_free(p->printer_name);
 	g_free(p->printer_address);
+	g_free(p->uri);
+	g_free(p->location);
+	g_free(p->make_and_model);
+	g_free(p->state);
 	g_free(p);
+}
+
+void cups_queue_job_free(struct cups_queue_job *j)
+{
+	if (!j)
+		return;
+
+	g_free(j->dest);
+	g_free(j->title);
+	g_free(j);
+}
+
+/* IPP printer-state: 3 idle, 4 processing, 5 stopped. */
+static const char *printer_state_string(const char *raw)
+{
+	int v = raw ? atoi(raw) : 3;
+
+	switch (v) {
+	case 4:
+		return "processing";
+	case 5:
+		return "stopped";
+	default:
+		return "idle";
+	}
+}
+
+const char *cups_backend_jobstate_string(int ipp_state)
+{
+	switch (ipp_state) {
+	case 3:
+		return "pending";
+	case 4:
+		return "held";
+	case 5:
+		return "processing";
+	case 6:
+		return "stopped";
+	case 7:
+		return "canceled";
+	case 8:
+		return "aborted";
+	case 9:
+		return "completed";
+	default:
+		return "pending";
+	}
 }
 
 void cups_caps_free(struct cups_caps *c)
@@ -133,6 +184,24 @@ GList *cups_backend_enumerate(void)
 			uri = cupsGetOption("printer-uri-supported",
 			                    d->num_options, d->options);
 		p->printer_address = address_from_uri(uri);
+
+		p->uri = g_strdup(uri ? uri : "");
+
+		{
+			const char *loc, *mm, *st;
+
+			loc = cupsGetOption("printer-location", d->num_options,
+			                    d->options);
+			p->location = g_strdup(loc ? loc : "");
+
+			mm = cupsGetOption("printer-make-and-model",
+			                   d->num_options, d->options);
+			p->make_and_model = g_strdup(mm ? mm : "");
+
+			st = cupsGetOption("printer-state", d->num_options,
+			                   d->options);
+			p->state = g_strdup(printer_state_string(st));
+		}
 
 		type_str = cupsGetOption("printer-type", d->num_options,
 		                         d->options);
@@ -593,6 +662,115 @@ const char *cups_backend_detect_format(const char *path)
 		return "image/png";
 
 	return NULL;
+}
+
+
+GList *cups_backend_list_jobs(void)
+{
+	cups_job_t *jobs = NULL;
+	int i, n;
+	GList *out = NULL;
+
+	/*
+	 * Every destination, every user, active jobs only - the Settings page
+	 * shows what is waiting to print, not a history.
+	 */
+	n = cupsGetJobs2(CUPS_HTTP_DEFAULT, &jobs, NULL, 0,
+	                 CUPS_WHICHJOBS_ACTIVE);
+
+	for (i = 0; i < n; i++) {
+		struct cups_queue_job *j = g_new0(struct cups_queue_job, 1);
+
+		j->id = jobs[i].id;
+		j->dest = g_strdup(jobs[i].dest ? jobs[i].dest : "");
+		j->title = g_strdup(jobs[i].title ? jobs[i].title : "");
+		j->ipp_state = (int) jobs[i].state;
+
+		out = g_list_prepend(out, j);
+	}
+
+	cupsFreeJobs(n, jobs);
+
+	return g_list_reverse(out);
+}
+
+/*
+ * Queue administration.
+ *
+ * There is no libcups helper for "add a printer", so this is the same
+ * CUPS-Add-Modify-Printer request lpadmin sends, posted to /admin/.
+ *
+ * No ppd-name is set, which makes a raw queue: CUPS hands the document to the
+ * printer untouched. That is deliberate. Asking for ppd-name=everywhere makes
+ * CUPS generate a driver by fetching the full attribute set including
+ * media-col-database, and a Lexmark MC2425adw tested against this code drops
+ * the connection on exactly that request - leaving lpadmin timed out and the
+ * queue attribute-less. A raw queue works wherever the printer accepts one of
+ * the formats we send, which for PDF and JPEG is the common case, and it
+ * cannot be broken by a printer that dislikes one particular query.
+ */
+static bool queue_admin_request(ipp_op_t op, const char *name,
+                                const char *info, const char *uri, int *err)
+{
+	ipp_t *request, *response;
+	char printer_uri[1024];
+
+	if (!name || !*name) {
+		*err = PM_ERR_BAD_PARAM_SYNTAX;
+		return false;
+	}
+
+	snprintf(printer_uri, sizeof(printer_uri),
+	         "ipp://localhost/printers/%s", name);
+
+	request = ippNewRequest(op);
+
+	ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri",
+	             NULL, printer_uri);
+
+	if (op == IPP_OP_CUPS_ADD_MODIFY_PRINTER) {
+		ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT,
+		             "printer-info", NULL, info && *info ? info : name);
+		ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_URI,
+		             "device-uri", NULL, uri);
+		ippAddInteger(request, IPP_TAG_PRINTER, IPP_TAG_ENUM,
+		              "printer-state", IPP_PSTATE_IDLE);
+		ippAddBoolean(request, IPP_TAG_PRINTER,
+		              "printer-is-accepting-jobs", 1);
+	}
+
+	response = cupsDoRequest(CUPS_HTTP_DEFAULT, request, "/admin/");
+
+	if (!response || cupsLastError() > IPP_STATUS_OK_EVENTS_COMPLETE) {
+		g_warning("Queue admin request for '%s' failed: %s", name,
+		          cupsLastErrorString());
+		if (response)
+			ippDelete(response);
+		*err = PM_ERR_PRINTER_DB_ACCESS;
+		return false;
+	}
+
+	ippDelete(response);
+
+	return true;
+}
+
+bool cups_backend_add_queue(const char *name, const char *info,
+                            const char *uri, int *err)
+{
+	if (!uri || !*uri) {
+		*err = PM_ERR_BAD_PARAM_SYNTAX;
+		return false;
+	}
+
+	return queue_admin_request(IPP_OP_CUPS_ADD_MODIFY_PRINTER, name, info,
+	                           uri, err);
+}
+
+bool cups_backend_remove_queue(const char *name, int *err)
+{
+	return queue_admin_request(IPP_OP_CUPS_DELETE_PRINTER, name, NULL, NULL,
+	                           err);
 }
 
 // vim:ts=4:sw=4:noexpandtab

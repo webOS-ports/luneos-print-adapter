@@ -50,6 +50,20 @@
 #define PRINT_SERVICE_LEGACY_NAME	"com.palm.printmgr"
 #define PRINT_SERVICE_NAME		"com.webos.service.print"
 
+/*
+ * The Settings app's Print Manager page speaks a different, simpler API than
+ * the webOS one, under its own bus name. Both are served: the legacy surface
+ * is what the enyo print dialog and any ported app calls, and this one is what
+ * the LuneOS Settings page was written against. They share all the machinery
+ * underneath - same CUPS backend, same printer database, same notion of which
+ * printer is the default - and differ only in the shape of the JSON.
+ */
+#define PORTS_SERVICE_NAME		"org.webosports.service.print"
+
+#define CAT_ROOT			"/"
+#define METHOD_LIST_PRINTERS		"listPrinters"
+#define METHOD_LIST_JOBS		"listJobs"
+
 #define PRINTER_DB_PATH		"/var/preferences/com.palm.printmgr/printers.conf"
 #define SPOOL_ROOT		"/var/spool/luneos-print"
 
@@ -75,6 +89,7 @@ extern GMainLoop *event_loop;
 
 struct print_service {
 	LSHandle *handle;
+	LSHandle *ports_handle;		/* org.webosports.service.print */
 	struct printer_db *db;
 	struct job_manager *jobs;
 	GList *known_printers;		/* struct cups_printer*, last browse */
@@ -160,6 +175,9 @@ static void post_printer_event(struct print_service *s,
 	j_release(&o);
 }
 
+static void ports_post_printers(struct print_service *s);
+static void ports_post_jobs(struct print_service *s);
+
 static gint printer_cmp_id(gconstpointer a, gconstpointer b)
 {
 	const struct cups_printer *pa = a;
@@ -196,6 +214,8 @@ static gboolean browse_printers(gpointer data)
 
 	g_list_free_full(s->known_printers, (GDestroyNotify) cups_printer_free);
 	s->known_printers = current;
+
+	ports_post_printers(s);
 
 	return G_SOURCE_CONTINUE;
 }
@@ -727,6 +747,10 @@ static gboolean poll_jobs(gpointer data)
 	}
 
 	g_list_free(jobs);
+
+	/* The Settings queue view is driven from CUPS directly, so it needs a
+	 * push on every poll rather than only when one of our own jobs moves. */
+	ports_post_jobs(s);
 
 	if (!any_active) {
 		s->poll_source = 0;
@@ -1771,6 +1795,383 @@ static bool jobs_all_at_once(LSHandle *h, LSMessage *m, void *ctx)
 	return true;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* org.webosports.service.print - the Settings app's Print Manager     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A second, flatter surface over the same machinery. Field names, the state
+ * vocabulary and the method names all follow what
+ * settings-common/qml/General/PrintManagerPage.qml documents and calls; the
+ * page shows a "service unavailable" notice until these answer.
+ */
+
+static jvalue_ref ports_printers_payload(struct print_service *s)
+{
+	jvalue_ref reply, arr;
+	const char *current;
+	GList *l;
+
+	arr = jarray_create(NULL);
+
+	for (l = s->known_printers; l; l = l->next) {
+		struct cups_printer *p = l->data;
+		jvalue_ref o = jobject_create();
+
+		jobject_put(o, J_CSTR_TO_JVAL("printerId"),
+		            jstring_create(p->printer_id));
+		jobject_put(o, J_CSTR_TO_JVAL("name"),
+		            jstring_create(p->printer_name ? p->printer_name
+		                                           : p->printer_id));
+		jobject_put(o, J_CSTR_TO_JVAL("uri"),
+		            jstring_create(p->uri ? p->uri : ""));
+		jobject_put(o, J_CSTR_TO_JVAL("location"),
+		            jstring_create(p->location ? p->location : ""));
+		jobject_put(o, J_CSTR_TO_JVAL("makeAndModel"),
+		            jstring_create(p->make_and_model ?
+		                           p->make_and_model : ""));
+		jobject_put(o, J_CSTR_TO_JVAL("state"),
+		            jstring_create(p->state ? p->state : "idle"));
+		/*
+		 * The page splits the list on this: discovered printers are
+		 * listed under "Auto Discovered" and cannot be swiped away,
+		 * typed-in ones under "Manually Added" and can.
+		 */
+		jobject_put(o, J_CSTR_TO_JVAL("discovered"),
+		            jboolean_create(p->is_discovered));
+
+		jarray_append(arr, o);
+	}
+
+	current = printer_db_get_current(s->db);
+
+	reply = jobject_create();
+	put_ok(reply);
+	jobject_put(reply, J_CSTR_TO_JVAL("printers"), arr);
+	jobject_put(reply, J_CSTR_TO_JVAL("defaultPrinterId"),
+	            jstring_create(current ? current : ""));
+
+	return reply;
+}
+
+static jvalue_ref ports_jobs_payload(void)
+{
+	jvalue_ref reply, arr;
+	GList *jobs, *l;
+
+	arr = jarray_create(NULL);
+
+	jobs = cups_backend_list_jobs();
+	for (l = jobs; l; l = l->next) {
+		struct cups_queue_job *j = l->data;
+		jvalue_ref o = jobject_create();
+
+		jobject_put(o, J_CSTR_TO_JVAL("jobId"),
+		            jnumber_create_i32(j->id));
+		jobject_put(o, J_CSTR_TO_JVAL("title"),
+		            jstring_create(j->title ? j->title : ""));
+		jobject_put(o, J_CSTR_TO_JVAL("printerId"),
+		            jstring_create(j->dest ? j->dest : ""));
+		jobject_put(o, J_CSTR_TO_JVAL("printerName"),
+		            jstring_create(j->dest ? j->dest : ""));
+		jobject_put(o, J_CSTR_TO_JVAL("state"),
+		            jstring_create(cups_backend_jobstate_string(j->ipp_state)));
+		/*
+		 * cups_job_t carries no impression counts, so the page falls
+		 * back to a plain "Printing" rather than "3 of 8". Reporting
+		 * zero is honest; inventing a page count would not be.
+		 */
+		jobject_put(o, J_CSTR_TO_JVAL("pages"), jnumber_create_i32(0));
+		jobject_put(o, J_CSTR_TO_JVAL("completedPages"),
+		            jnumber_create_i32(0));
+
+		jarray_append(arr, o);
+	}
+	g_list_free_full(jobs, (GDestroyNotify) cups_queue_job_free);
+
+	reply = jobject_create();
+	put_ok(reply);
+	jobject_put(reply, J_CSTR_TO_JVAL("jobs"), arr);
+
+	return reply;
+}
+
+static void ports_post_printers(struct print_service *s)
+{
+	jvalue_ref o;
+
+	if (!s->ports_handle)
+		return;
+
+	o = ports_printers_payload(s);
+	luna_service_post_subscription(s->ports_handle, CAT_ROOT,
+	                               METHOD_LIST_PRINTERS, o);
+	j_release(&o);
+}
+
+static void ports_post_jobs(struct print_service *s)
+{
+	jvalue_ref o;
+
+	if (!s->ports_handle)
+		return;
+
+	o = ports_jobs_payload();
+	luna_service_post_subscription(s->ports_handle, CAT_ROOT,
+	                               METHOD_LIST_JOBS, o);
+	j_release(&o);
+}
+
+static bool ports_list_printers(LSHandle *h, LSMessage *m, void *ctx)
+{
+	struct print_service *s = ctx;
+	jvalue_ref reply;
+	bool subscribed;
+
+	subscribed = luna_service_check_for_subscription_and_process(h, m);
+
+	reply = ports_printers_payload(s);
+	put_subscribed(reply, subscribed);
+	luna_service_message_validate_and_send(h, m, reply);
+	j_release(&reply);
+
+	return true;
+}
+
+static bool ports_list_jobs(LSHandle *h, LSMessage *m, void *ctx)
+{
+	jvalue_ref reply;
+	bool subscribed;
+
+	(void) ctx;
+
+	subscribed = luna_service_check_for_subscription_and_process(h, m);
+
+	reply = ports_jobs_payload();
+	put_subscribed(reply, subscribed);
+	luna_service_message_validate_and_send(h, m, reply);
+	j_release(&reply);
+
+	return true;
+}
+
+static bool ports_add_printer(LSHandle *h, LSMessage *m, void *ctx)
+{
+	struct print_service *s = ctx;
+	jvalue_ref parsed, reply;
+	const char *name, *uri;
+	char *queue_name;
+	int err = 0;
+	size_t i;
+
+	parsed = luna_service_message_parse_and_validate(LSMessageGetPayload(m));
+	if (!parsed) {
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	if (!luna_get_string(parsed, "name", &name) ||
+	    !luna_get_string(parsed, "uri", &uri)) {
+		j_release(&parsed);
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	/*
+	 * A CUPS queue name cannot contain spaces, "/" or "#", but the page
+	 * lets the user type anything as a display name. Fold the typed name
+	 * into something CUPS accepts and keep the original as printer-info.
+	 */
+	queue_name = g_strdup(name);
+	for (i = 0; queue_name[i]; i++) {
+		if (!g_ascii_isalnum(queue_name[i]) && queue_name[i] != '_' &&
+		    queue_name[i] != '-' && queue_name[i] != '.')
+			queue_name[i] = '_';
+	}
+
+	if (!*queue_name) {
+		g_free(queue_name);
+		j_release(&parsed);
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	if (!cups_backend_add_queue(queue_name, name, uri, &err)) {
+		g_free(queue_name);
+		j_release(&parsed);
+		reply_err(h, m, err);
+		return true;
+	}
+
+	/* Remember it on this network, the same list the webOS API reports. */
+	printer_db_add(s->db, queue_name, name, uri, s->ssid, &err);
+
+	reply = jobject_create();
+	put_ok(reply);
+	jobject_put(reply, J_CSTR_TO_JVAL("printerId"),
+	            jstring_create(queue_name));
+	luna_service_message_validate_and_send(h, m, reply);
+	j_release(&reply);
+
+	/* Re-browse now so the page updates without waiting for the timer. */
+	browse_printers(s);
+	ports_post_printers(s);
+
+	g_free(queue_name);
+	j_release(&parsed);
+
+	return true;
+}
+
+static bool ports_remove_printer(LSHandle *h, LSMessage *m, void *ctx)
+{
+	struct print_service *s = ctx;
+	jvalue_ref parsed;
+	const char *printer_id;
+	int err = 0;
+
+	parsed = luna_service_message_parse_and_validate(LSMessageGetPayload(m));
+	if (!parsed) {
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	if (!luna_get_string(parsed, "printerId", &printer_id)) {
+		j_release(&parsed);
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	if (!cups_backend_remove_queue(printer_id, &err)) {
+		j_release(&parsed);
+		reply_err(h, m, err);
+		return true;
+	}
+
+	printer_db_delete(s->db, printer_id, NULL);
+
+	luna_service_message_reply_success(h, m);
+
+	browse_printers(s);
+	ports_post_printers(s);
+
+	j_release(&parsed);
+
+	return true;
+}
+
+static bool ports_set_default_printer(LSHandle *h, LSMessage *m, void *ctx)
+{
+	struct print_service *s = ctx;
+	jvalue_ref parsed;
+	const char *printer_id;
+
+	parsed = luna_service_message_parse_and_validate(LSMessageGetPayload(m));
+	if (!parsed) {
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	if (!luna_get_string(parsed, "printerId", &printer_id)) {
+		j_release(&parsed);
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	/* Same stored value the webOS printers/setCurrent writes, so the two
+	 * APIs cannot disagree about which printer is the default. */
+	if (!printer_db_set_current(s->db, printer_id)) {
+		j_release(&parsed);
+		reply_err(h, m, PM_ERR_SET_CURRENT_PRINTER_FAILED);
+		return true;
+	}
+
+	luna_service_message_reply_success(h, m);
+	ports_post_printers(s);
+
+	j_release(&parsed);
+
+	return true;
+}
+
+static bool ports_cancel_job(LSHandle *h, LSMessage *m, void *ctx)
+{
+	struct print_service *s = ctx;
+	jvalue_ref parsed;
+	GList *jobs, *l;
+	int job_id;
+	bool done = false;
+
+	parsed = luna_service_message_parse_and_validate(LSMessageGetPayload(m));
+	if (!parsed) {
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	if (!luna_get_int(parsed, "jobId", &job_id)) {
+		j_release(&parsed);
+		reply_err(h, m, PM_ERR_BAD_PARAM_SYNTAX);
+		return true;
+	}
+
+	/* jobId here is the CUPS job id, so the destination has to be looked
+	 * up before it can be cancelled. */
+	jobs = cups_backend_list_jobs();
+	for (l = jobs; l; l = l->next) {
+		struct cups_queue_job *j = l->data;
+
+		if (j->id == job_id) {
+			done = cups_backend_cancel(j->dest, j->id);
+			break;
+		}
+	}
+	g_list_free_full(jobs, (GDestroyNotify) cups_queue_job_free);
+
+	if (!done) {
+		j_release(&parsed);
+		reply_err(h, m, PM_ERR_JOB_CANCEL_FAILED);
+		return true;
+	}
+
+	luna_service_message_reply_success(h, m);
+	ports_post_jobs(s);
+
+	j_release(&parsed);
+
+	return true;
+}
+
+static bool ports_cancel_all_jobs(LSHandle *h, LSMessage *m, void *ctx)
+{
+	struct print_service *s = ctx;
+	GList *jobs, *l;
+
+	jobs = cups_backend_list_jobs();
+	for (l = jobs; l; l = l->next) {
+		struct cups_queue_job *j = l->data;
+
+		cups_backend_cancel(j->dest, j->id);
+	}
+	g_list_free_full(jobs, (GDestroyNotify) cups_queue_job_free);
+
+	luna_service_message_reply_success(h, m);
+	ports_post_jobs(s);
+
+	return true;
+}
+
+static LSMethod ports_methods[] = {
+	{ METHOD_LIST_PRINTERS, ports_list_printers },
+	{ METHOD_LIST_JOBS, ports_list_jobs },
+	{ "addPrinter", ports_add_printer },
+	{ "removePrinter", ports_remove_printer },
+	{ "setDefaultPrinter", ports_set_default_printer },
+	{ "cancelJob", ports_cancel_job },
+	{ "cancelAllJobs", ports_cancel_all_jobs },
+	{ NULL, NULL },
+};
+
 /* ------------------------------------------------------------------ */
 /* registration                                                       */
 /* ------------------------------------------------------------------ */
@@ -1854,6 +2255,34 @@ struct print_service *print_service_create(void)
 		goto error;
 	}
 
+	/*
+	 * Second bus name for the Settings page. A separate LSHandle is
+	 * required - LSRegister binds one name per handle - but everything
+	 * behind it is shared.
+	 */
+	if (!LSRegister(PORTS_SERVICE_NAME, &service->ports_handle, &error)) {
+		g_warning("Failed to register %s: %s - the Settings Print "
+		          "Manager page will report no service",
+		          PORTS_SERVICE_NAME, error.message);
+		LSErrorFree(&error);
+		LSErrorInit(&error);
+		service->ports_handle = NULL;
+	} else if (!LSGmainAttach(service->ports_handle, event_loop, &error)) {
+		g_warning("Failed to attach %s to the main loop: %s",
+		          PORTS_SERVICE_NAME, error.message);
+		goto error;
+	} else if (!LSRegisterCategory(service->ports_handle, CAT_ROOT,
+	                               ports_methods, NULL, NULL, &error)) {
+		g_critical("Failed to register the %s category: %s",
+		           PORTS_SERVICE_NAME, error.message);
+		goto error;
+	} else if (!LSCategorySetData(service->ports_handle, CAT_ROOT, service,
+	                              &error)) {
+		g_critical("Could not set %s data: %s", PORTS_SERVICE_NAME,
+		           error.message);
+		goto error;
+	}
+
 	service->db = printer_db_open(PRINTER_DB_PATH);
 	service->jobs = job_manager_new(SPOOL_ROOT);
 
@@ -1897,6 +2326,14 @@ void print_service_free(struct print_service *service)
 
 	if (service->handle && !LSUnregister(service->handle, &error)) {
 		g_warning("Could not unregister service: %s", error.message);
+		LSErrorFree(&error);
+		LSErrorInit(&error);
+	}
+
+	if (service->ports_handle &&
+	    !LSUnregister(service->ports_handle, &error)) {
+		g_warning("Could not unregister %s: %s", PORTS_SERVICE_NAME,
+		          error.message);
 		LSErrorFree(&error);
 	}
 

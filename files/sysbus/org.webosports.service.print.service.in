@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.webosports.service.print
+Exec=@WEBOS_INSTALL_SBINDIR@/luneos-print-adapter
+Type=static

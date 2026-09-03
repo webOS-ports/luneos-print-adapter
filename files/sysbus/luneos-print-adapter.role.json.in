@@ -2,7 +2,7 @@
     "exeName":"@WEBOS_INSTALL_SBINDIR@/luneos-print-adapter",
     "trustLevel": "oem",
     "type": "privileged",
-    "allowedNames": ["com.palm.printmgr", "com.webos.service.print"],
+    "allowedNames": ["com.palm.printmgr", "com.webos.service.print", "org.webosports.service.print"],
     "permissions": [
         {
             "service":"com.palm.printmgr",
@@ -11,6 +11,11 @@
         },
         {
             "service":"com.webos.service.print",
+            "inbound":["*"],
+            "outbound":["*"]
+        },
+        {
+            "service":"org.webosports.service.print",
             "inbound":["*"],
             "outbound":["*"]
         }

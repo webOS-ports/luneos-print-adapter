@@ -5,6 +5,15 @@
     "com.webos.service.print": [
         "print.operation"
     ],
+    "org.webosports.service.print": [
+        "print.operation"
+    ],
+    "org.webosports.app.settings*": [
+        "print.operation"
+    ],
+    "com.palm.app.settings*": [
+        "print.operation"
+    ],
     "com.webos.surfacemanager-cardshell": [
         "print.query"
     ],
