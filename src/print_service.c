@@ -36,6 +36,7 @@
 #include <sys/stat.h>
 
 #include <glib.h>
+#include <cups/cups.h>
 #include <luna-service2/lunaservice.h>
 #include <pbnjson.h>
 
@@ -642,9 +643,10 @@ static void post_job_state(struct print_service *s, struct print_job *job,
 		                                      G_USEC_PER_SEC)));
 	} else {
 		jobject_put(o, J_CSTR_TO_JVAL("currentPage"),
-		            jnumber_create_i32(job->current_page));
+		            jnumber_create_i32(job_reported_page(job,
+		                                                 job->current_page)));
 		jobject_put(o, J_CSTR_TO_JVAL("totalPages"),
-		            jnumber_create_i32(job->total_pages));
+		            jnumber_create_i32(job_reported_total_pages(job)));
 
 		arr = jarray_create(NULL);
 		for (l = blocked_reasons; l; l = l->next)
@@ -664,9 +666,10 @@ static void post_page_info(struct print_service *s, struct print_job *job,
 	jobject_put(o, J_CSTR_TO_JVAL("statusId"), jstring_create(status_id));
 	jobject_put(o, J_CSTR_TO_JVAL("pageNum"), jnumber_create_i32(page));
 	jobject_put(o, J_CSTR_TO_JVAL("copyNum"), jnumber_create_i32(1));
-	jobject_put(o, J_CSTR_TO_JVAL("currentPage"), jnumber_create_i32(page));
+	jobject_put(o, J_CSTR_TO_JVAL("currentPage"),
+	            jnumber_create_i32(job_reported_page(job, page)));
 	jobject_put(o, J_CSTR_TO_JVAL("totalPages"),
-	            jnumber_create_i32(job->total_pages));
+	            jnumber_create_i32(job_reported_total_pages(job)));
 	/* The daemon sent this as the *string* "false"/"true", not a boolean. */
 	jobject_put(o, J_CSTR_TO_JVAL("pageCorrupted"), jstring_create("false"));
 	jobject_put(o, J_CSTR_TO_JVAL("pageTime"), jnumber_create_i32(0));
@@ -1267,7 +1270,7 @@ static bool jobs_add_file(LSHandle *h, LSMessage *m, void *ctx)
 	struct print_service *s = ctx;
 	jvalue_ref parsed;
 	struct print_job *job;
-	const char *path;
+	const char *path, *format;
 	struct stat st;
 	int job_id, current_page = 0, total_pages = 0;
 
@@ -1315,7 +1318,8 @@ static bool jobs_add_file(LSHandle *h, LSMessage *m, void *ctx)
 	 * nothing recognisable at all - is caught here rather than by the
 	 * printer.
 	 */
-	if (!cups_backend_detect_format(path)) {
+	format = cups_backend_detect_format(path);
+	if (!format) {
 		j_release(&parsed);
 		reply_err(h, m, PM_ERR_UNSUPPORTED_MIME_TYPE);
 		return true;
@@ -1338,6 +1342,8 @@ static bool jobs_add_file(LSHandle *h, LSMessage *m, void *ctx)
 		job->total_pages = total_pages;
 
 	job->files = g_list_append(job->files, g_strdup(path));
+	if (!strcmp(format, CUPS_FORMAT_PDF))
+		job->has_pdf = true;
 
 	post_page_info(s, job, "PAGESTARTINFO", (int) g_list_length(job->files));
 
@@ -1409,7 +1415,7 @@ static bool submit_job(struct print_service *s, struct print_job *job, int *err)
 
 	build_cups_params(job, &params, max_res);
 
-	cups_id = cups_backend_submit(job->printer_id, job->description,
+	cups_id = cups_backend_submit(job->printer_id, job_title(job),
 	                              job->files, &params, err);
 	if (cups_id < 0)
 		return false;
@@ -1692,7 +1698,7 @@ static bool jobs_all_at_once(LSHandle *h, LSMessage *m, void *ctx)
 	struct print_service *s = ctx;
 	jvalue_ref parsed, reply, paths;
 	struct print_job *job;
-	const char *printer_id, *description, *app_name;
+	const char *printer_id, *description, *app_name, *format;
 	bool auto_scale = false;
 	ssize_t i, n;
 	int err = 0;
@@ -1763,7 +1769,8 @@ static bool jobs_all_at_once(LSHandle *h, LSMessage *m, void *ctx)
 			return true;
 		}
 
-		if (!cups_backend_detect_format(buf.m_str)) {
+		format = cups_backend_detect_format(buf.m_str);
+		if (!format) {
 			job_manager_remove(s->jobs, job->job_id);
 			j_release(&parsed);
 			reply_err(h, m, PM_ERR_UNSUPPORTED_MIME_TYPE);
@@ -1771,6 +1778,8 @@ static bool jobs_all_at_once(LSHandle *h, LSMessage *m, void *ctx)
 		}
 
 		job->files = g_list_append(job->files, g_strdup(buf.m_str));
+		if (!strcmp(format, CUPS_FORMAT_PDF))
+			job->has_pdf = true;
 	}
 
 	job->total_pages = (int) n;
