@@ -26,3 +26,10 @@ gcc $CFLAGS $GLIB_CFLAGS \
     test_area.c ../src/job_manager.c ../src/print_errors.c \
     $GLIB_LIBS -lm -o build/test_area
 ./build/test_area
+
+echo
+echo "=== job pages and title ==="
+gcc $CFLAGS -Werror $GLIB_CFLAGS \
+    test_job.c ../src/job_manager.c ../src/print_errors.c \
+    $GLIB_LIBS -lm -o build/test_job
+./build/test_job

@@ -76,6 +76,12 @@ struct print_job {
 	char *render_result_text;
 	int current_page;
 	int total_pages;
+	/*
+	 * A PDF is in the job. Apps count files as pages (webOS sent one
+	 * image per page), and a PDF holds any number, so then the numbers
+	 * say nothing about pages and are not reported.
+	 */
+	bool has_pdf;
 	/* Last reported state, so we only post subscriptions on change. */
 	char *last_printer_state;
 	gint64 queued_at;
@@ -105,6 +111,20 @@ bool job_manager_resize_temp_file(struct print_job *job, const char *path,
                                   gint64 new_size, int *err);
 
 /* Defaults matching what the shipped daemon reported for a fresh job. */
+/*
+ * The page numbers to report for a job: 0 where they are not known, which
+ * is always so once a PDF is in it ("Page 1 of 1" for an 18-page PDF).
+ */
+int job_reported_page(const struct print_job *job, int page);
+int job_reported_total_pages(const struct print_job *job);
+
+/*
+ * The job's name in the print queue: its description, else the app that
+ * printed it, else NULL for the default. An app that names nothing would
+ * otherwise get a job with an empty name.
+ */
+const char *job_title(const struct print_job *job);
+
 void print_params_init(struct print_params *p);
 void print_params_clear(struct print_params *p);
 

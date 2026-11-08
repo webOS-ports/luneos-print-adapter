@@ -298,6 +298,25 @@ struct job_manager *job_manager_new(const char *spool_root)
 	return jm;
 }
 
+int job_reported_page(const struct print_job *job, int page)
+{
+	return job->has_pdf || page < 0 ? 0 : page;
+}
+
+int job_reported_total_pages(const struct print_job *job)
+{
+	return job_reported_page(job, job->total_pages);
+}
+
+const char *job_title(const struct print_job *job)
+{
+	if (job->description && *job->description)
+		return job->description;
+	if (job->app_name && *job->app_name)
+		return job->app_name;
+	return NULL;
+}
+
 void job_manager_free(struct job_manager *jm)
 {
 	if (!jm)
